@@ -31,6 +31,25 @@ def angles(origin, target):
     return [math.atan2(dy, dx), math.atan2(dz, math.hypot(dx, dy))]
 
 
+def ballistic_intercept(origin, target, velocity, speed, gravity, max_time=7):
+    """Iterate the low ballistic arc against a constant-velocity target."""
+    flight = math.dist(origin, target)/max(1, speed)
+    for _ in range(10):
+        predicted = [target[i]+velocity[i]*flight for i in range(3)]
+        dx, dy, dz = [predicted[i]-origin[i] for i in range(3)]
+        horizontal = math.hypot(dx, dy)
+        if horizontal < 1e-4 or gravity <= 0:
+            return None
+        discriminant = speed**4-gravity*(gravity*horizontal**2+2*dz*speed**2)
+        if discriminant < 0:
+            return None
+        pitch = math.atan2(speed*speed-math.sqrt(discriminant), gravity*horizontal)
+        flight = horizontal/(speed*math.cos(pitch))
+        if not 0 < flight < max_time:
+            return None
+    return [math.atan2(dy, dx), pitch], flight
+
+
 def projectile_danger(me, move, speed, projectiles, radius, height, mortar_gravity=22):
     """Penalize trajectories predicted to pass through our body in the next second."""
     center = [me['pos'][0], me['pos'][1], me['pos'][2] + height * .5]

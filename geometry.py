@@ -182,7 +182,7 @@ class World:
 
 
 class Navigation:
-    def __init__(self, world, config, step=8.0):
+    def __init__(self, world, config, step=4.0):
         self.world, self.step = world, step
         b = world.bounds
         self.x0, self.y0 = b['minX'] + 5, b['minY'] + 5
