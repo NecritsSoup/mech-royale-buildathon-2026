@@ -1,6 +1,6 @@
 """Static arena collision, terrain and bounded grid navigation. Standard library only."""
 from array import array
-from collections import defaultdict
+from collections import defaultdict, deque
 import heapq
 import json
 import math
@@ -180,6 +180,36 @@ class World:
     def cover_distance(self, x, y):
         return min((math.sqrt(edge_distance_sq(x, y, self.prisms[i].ring)) for i in self.nearby(x, y, 24)), default=40)
 
+    def cover_points(self, position, radius, height, limit=8, max_distance=36):
+        """Nearby wall-adjacent positions with room for the current body."""
+        candidates = []
+        offset = radius+1
+        for index in sorted(self.nearby(*position[:2], max_distance)):
+            prism = self.prisms[index]
+            for ring in [prism.ring, *prism.holes]:
+                j = len(ring)-2
+                for i in range(0, len(ring), 2):
+                    ax, ay, bx, by = ring[j], ring[j+1], ring[i], ring[i+1]
+                    dx, dy = bx-ax, by-ay
+                    length = math.hypot(dx, dy)
+                    if length > 1e-6:
+                        t = max(0, min(1, ((position[0]-ax)*dx+(position[1]-ay)*dy)/(length*length)))
+                        for sign in (-1, 1):
+                            point = (ax+dx*t-sign*dy/length*offset, ay+dy*t+sign*dx/length*offset)
+                            distance = math.dist(point, position[:2])
+                            if distance <= max_distance:
+                                candidates.append((distance, point))
+                    j = i
+        output = []
+        for _, point in sorted(candidates):
+            if any(math.dist(point, previous) < 3 for previous in output):
+                continue
+            if self.ground_clear(*point, radius, height):
+                output.append(point)
+                if len(output) >= limit:
+                    break
+        return output
+
 
 class Navigation:
     def __init__(self, world, config, step=4.0):
@@ -200,6 +230,27 @@ class Navigation:
                                                   config.get('step_up', 1.2), config.get('max_slope_deg', 50))
         self.path, self.goal, self.planned_at = [], None, -100
         self.blocked_edges = set()
+        self.route_probe = None
+        # Four-way components equal the planner's eight-way connectivity when
+        # diagonal corner cutting is forbidden. These are optimistic labels:
+        # later learned blockages can remove routes, but cannot add one.
+        self.components = array('i', [-1])*len(self.mask)
+        label = 0
+        for source, walkable in enumerate(self.mask):
+            if not walkable or self.components[source] >= 0:
+                continue
+            self.components[source] = label
+            queue = deque([source])
+            while queue:
+                current = queue.popleft()
+                x, y = current % self.width, current // self.width
+                for nx, ny in ((x-1,y),(x+1,y),(x,y-1),(x,y+1)):
+                    if 0 <= nx < self.width and 0 <= ny < self.height:
+                        nxt = ny*self.width+nx
+                        if self.mask[nxt] and self.components[nxt] < 0:
+                            self.components[nxt] = label
+                            queue.append(nxt)
+            label += 1
 
     def point(self, index):
         return self.x0 + index % self.width * self.step, self.y0 + index // self.width * self.step
@@ -220,6 +271,10 @@ class Navigation:
             if candidates:
                 return min(candidates, key=lambda n: math.dist(self.point(n), point[:2]))
         return None
+
+    def connected(self, start, goal):
+        source, target = self.nearest(start), self.nearest(goal)
+        return source is not None and target is not None and self.components[source] == self.components[target]
 
     def plan(self, start, goal):
         source, target = self.nearest(start), self.nearest(goal)
@@ -260,6 +315,26 @@ class Navigation:
             path.append(parents[path[-1]])
         path.reverse()
         return [self.point(index) for index in path]
+
+    def route_distance(self, position, goal, now):
+        """Estimate a detour without replacing the active movement path.
+
+        The bounded planner can return only part of a route. Include the
+        remaining chord in that case, so a short partial path never means
+        the destination is close. This is still an estimate, not an ETA.
+        """
+        probe = self.route_probe
+        if (probe is None or now-probe['at'] >= 2
+                or math.dist(position[:2], probe['origin']) > 12
+                or math.dist(goal[:2], probe['goal']) > 8
+                or len(self.blocked_edges) != probe['blocked']):
+            path = self.plan(position, goal)
+            points = [tuple(position[:2]), *path, tuple(goal[:2])]
+            distance = sum(math.dist(a, b) for a, b in zip(points, points[1:]))
+            self.route_probe = {'origin': tuple(position[:2]), 'goal': tuple(goal[:2]),
+                                'at': now, 'distance': distance,
+                                'blocked': len(self.blocked_edges)}
+        return max(math.dist(position[:2], goal[:2]), self.route_probe['distance'])
 
     def direction(self, position, goal, now, radius, height):
         if math.dist(position[:2], goal[:2]) < 2:
